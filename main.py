@@ -1,5 +1,10 @@
 import argparse
+import sys
+import io
 from apscheduler.schedulers.blocking import BlockingScheduler
+
+#fix unicode output on windows
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 from discovery import discover
 from analyzer import analyze_events, format_opportunity
 from executor import execute_opportunity

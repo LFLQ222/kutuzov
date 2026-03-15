@@ -1,77 +1,74 @@
 import argparse
+import json
 import sys
 import io
-from apscheduler.schedulers.blocking import BlockingScheduler
 
 #fix unicode output on windows
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+
+from apscheduler.schedulers.blocking import BlockingScheduler
 from discovery import discover
-from analyzer import analyze_events, format_opportunity
+from analyzer import analyze_events, compute_bet_amounts
 from executor import execute_opportunity
 from monitor import check_positions
 from notifier import notify_opportunity
 from config import BET_BUDGET, MIN_PROFIT_MARGIN
 
 
-def scan():
-    """one-shot scan for arbitrage opportunities"""
-    events = discover()
-    if not events:
-        print("no multi-outcome events found")
-        return []
-
-    opportunities = analyze_events(events)
-    if not opportunities:
-        print("no arbitrage opportunities found")
-        return []
-
-    print(f"\nfound {len(opportunities)} opportunities:\n")
+def to_json(opportunities, budget):
+    """convert opportunities to json-serializable list"""
+    results = []
     for opp in opportunities:
-        print(format_opportunity(opp, budget=BET_BUDGET))
-        print()
+        payout = budget / opp["price_sum"]
+        results.append({
+            "event_id": opp["event_id"],
+            "event_title": opp["event_title"],
+            "end_date": opp["end_date"],
+            "k": opp["k"],
+            "price_sum": round(opp["price_sum"], 4),
+            "profit_margin_pct": round(opp["profit_margin"] * 100, 2),
+            "guaranteed_payout": round(payout, 2),
+            "guaranteed_profit": round(payout - budget, 2),
+            "candidates": [
+                {"question": c["question"], "price": c["price"], "allocation_pct": round(c["allocation_pct"], 1)}
+                for c in opp["candidates"]
+            ],
+        })
+    return results
 
+
+def scan():
+    events = discover()
+    opportunities = analyze_events(events) if events else []
+    print(json.dumps(to_json(opportunities, BET_BUDGET), indent=2, ensure_ascii=False))
     return opportunities
 
 
 def scan_and_notify():
-    """scan and send telegram alerts for qualifying opportunities"""
-    print("running scheduled scan...")
+    print("running scheduled scan...", file=sys.stderr)
     events = discover()
     if not events:
         return
-
-    opportunities = analyze_events(events)
-    for opp in opportunities:
+    for opp in analyze_events(events):
         if opp["profit_margin"] >= MIN_PROFIT_MARGIN:
-            print(format_opportunity(opp, budget=BET_BUDGET))
             notify_opportunity(opp, budget=BET_BUDGET)
-
     check_positions()
 
 
 def execute(event_id):
-    """manually execute on a specific event"""
     events = discover()
     opportunities = analyze_events(events)
-
-    target = None
-    for opp in opportunities:
-        if str(opp["event_id"]) == str(event_id):
-            target = opp
-            break
-
+    target = next((o for o in opportunities if str(o["event_id"]) == str(event_id)), None)
     if not target:
-        print(f"no arbitrage opportunity found for event {event_id}")
+        print(f"no opportunity found for event {event_id}", file=sys.stderr)
         return
-
-    print(format_opportunity(target, budget=BET_BUDGET))
-    print(f"\nexecuting with ${BET_BUDGET:.2f} budget...")
+    print(json.dumps(to_json([target], BET_BUDGET)[0], indent=2, ensure_ascii=False))
     execute_opportunity(target, budget=BET_BUDGET)
 
 
 def main():
     parser = argparse.ArgumentParser(description="polymarket multi-outcome arbitrage bot")
-    parser.add_argument("--scan", action="store_true", help="one-shot scan")
+    parser.add_argument("--scan", action="store_true", help="one-shot scan, output json")
     parser.add_argument("--execute", type=str, metavar="EVENT_ID", help="execute on event")
     parser.add_argument("--monitor", action="store_true", help="check open positions")
     args = parser.parse_args()
@@ -83,19 +80,14 @@ def main():
     elif args.monitor:
         check_positions()
     else:
-        #continuous scanner mode
-        print("starting continuous scanner (every 30 min)...")
-        print("press ctrl+c to stop\n")
-
-        #run once immediately
+        print("starting continuous scanner (every 30 min)...", file=sys.stderr)
         scan_and_notify()
-
         scheduler = BlockingScheduler()
         scheduler.add_job(scan_and_notify, "interval", minutes=30)
         try:
             scheduler.start()
         except (KeyboardInterrupt, SystemExit):
-            print("\nshutting down")
+            print("\nshutting down", file=sys.stderr)
 
 
 if __name__ == "__main__":

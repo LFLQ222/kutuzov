@@ -40,7 +40,10 @@ def to_json(opportunities, budget):
 def scan():
     events = discover()
     opportunities = analyze_events(events) if events else []
-    print(json.dumps(to_json(opportunities, BET_BUDGET), indent=2, ensure_ascii=False))
+    output = to_json(opportunities, BET_BUDGET)
+    with open("opportunities.json", "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+    print(f"wrote {len(output)} opportunities to opportunities.json")
     return opportunities
 
 

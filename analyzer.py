@@ -10,7 +10,10 @@ def find_arbitrage(event):
     if not outcomes:
         return None
 
-    #sort by price descending (highest probability first)
+    #sort by price descending, filter out zero-price outcomes
+    outcomes = [o for o in outcomes if o["price"] > 0]
+    if len(outcomes) < 2:
+        return None
     sorted_outcomes = sorted(outcomes, key=lambda x: x["price"], reverse=True)
 
     best_opportunity = None
@@ -32,19 +35,13 @@ def find_arbitrage(event):
         if profit_margin < MIN_PROFIT_MARGIN:
             continue
 
-        #compute allocations inversely proportional to price
-        inv_prices = [1.0 / o["price"] for o in top_k]
-        inv_sum = sum(inv_prices)
-        allocations = [ip / inv_sum for ip in inv_prices]
+        #allocate proportional to price for equal payouts across all outcomes
+        #S_i = budget * p_i / sum(p_j), payout if i wins = budget / sum(p_j)
+        allocations = [o["price"] / price_sum for o in top_k]
 
-        #verify guaranteed profit: min payout across all winning scenarios
-        #if outcome i wins: payout = allocation_i / price_i
-        payouts = [alloc / o["price"] for alloc, o in zip(allocations, top_k)]
-        min_payout = min(payouts)
-
-        #with normalized allocations summing to 1, min_payout should be 1/price_sum
-        #profit per dollar = min_payout - 1.0
-        profit_per_dollar = min_payout - 1.0
+        #guaranteed payout per dollar spent = 1 / sum(p_j)
+        guaranteed_payout = 1.0 / price_sum
+        profit_per_dollar = guaranteed_payout - 1.0
 
         opportunity = {
             "event_id": event.get("id"),
@@ -64,7 +61,7 @@ def find_arbitrage(event):
                 "price": outcome["price"],
                 "allocation_pct": allocations[i] * 100,
                 "yes_token_id": outcome.get("yes_token_id"),
-                "payout_if_wins": payouts[i],
+                "payout_if_wins": guaranteed_payout,
             })
 
         #keep the best k (highest profit margin)
@@ -124,10 +121,10 @@ def format_opportunity(opp, budget=None):
         for b in bets:
             lines.append(f"  {b['question']}: ${b['amount']:.2f} -> {b['expected_shares']:.2f} shares")
         total_spent = sum(b["amount"] for b in bets)
-        min_payout = min(b["expected_shares"] for b in bets)
+        guaranteed_payout = budget / opp["price_sum"]
         lines.append(f"  total spent: ${total_spent:.2f}")
-        lines.append(f"  guaranteed payout: ${min_payout:.2f}")
-        lines.append(f"  guaranteed profit: ${min_payout - total_spent:.2f}")
+        lines.append(f"  guaranteed payout: ${guaranteed_payout:.2f}")
+        lines.append(f"  guaranteed profit: ${guaranteed_payout - total_spent:.2f}")
 
     lines.append(f"{'='*50}")
     return "\n".join(lines)

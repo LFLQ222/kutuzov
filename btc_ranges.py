@@ -5,6 +5,7 @@ import math
 import requests
 import numpy as np
 import yfinance as yf
+from scipy.stats import norm
 from datetime import datetime, timezone
 from config import GAMMA_API_URL, BET_BUDGET
 
@@ -33,9 +34,7 @@ def fetch_btc_events():
 
 
 def parse_range(question):
-    """extract (low, high) from market question, returns (low, high) or None.
-    handles 'between $X and $Y', 'greater than $X', 'less than $X'
-    """
+    """extract (low, high) from market question"""
     q = question.lower().replace(",", "")
     m = re.search(r"between \$(\d+) and \$(\d+)", q)
     if m:
@@ -50,7 +49,7 @@ def parse_range(question):
 
 
 def parse_event_markets(event):
-    """extract ranges with prices and token ids from a btc daily event"""
+    """extract active ranges with prices and token ids"""
     markets = []
     for m in event.get("markets", []):
         if not m.get("active"):
@@ -62,7 +61,6 @@ def parse_event_markets(event):
             price = float(json.loads(op)[0])
         except (json.JSONDecodeError, IndexError, ValueError):
             continue
-
         r = parse_range(m.get("question", ""))
         if not r:
             continue
@@ -80,7 +78,7 @@ def parse_event_markets(event):
             "question": m["question"],
             "low": r[0],
             "high": r[1],
-            "market_price": price,
+            "price": price,
             "yes_token_id": token_id,
         })
 
@@ -89,22 +87,15 @@ def parse_event_markets(event):
 
 
 def get_btc_volatility(lookback_days=90):
-    """compute daily log-return std from recent BTC history"""
+    """daily log-return mean and std from recent BTC history"""
     btc = yf.download("BTC-USD", period=f"{lookback_days}d", interval="1d", progress=False)
     closes = btc["Close"].values.flatten()
-    current_price = closes[-1]
     log_returns = np.diff(np.log(closes))
-    mu = np.mean(log_returns)
-    sigma = np.std(log_returns)
-    return current_price, mu, sigma
+    return closes[-1], np.mean(log_returns), np.std(log_returns)
 
 
-def model_range_probabilities(current_price, mu, sigma, markets, days_ahead=1):
-    """compute our model probability for each range bucket using log-normal distribution.
-    price at resolution ~ LogNormal(ln(current) + mu*days, sigma*sqrt(days))
-    """
-    from scipy.stats import norm
-
+def model_probabilities(current_price, mu, sigma, markets, days_ahead):
+    """model probability for each range using log-normal distribution"""
     log_price = math.log(current_price)
     drift = mu * days_ahead
     vol = sigma * math.sqrt(days_ahead)
@@ -112,57 +103,91 @@ def model_range_probabilities(current_price, mu, sigma, markets, days_ahead=1):
     for m in markets:
         low, high = m["low"], m["high"]
         if low == 0:
-            #less than X
-            z = (math.log(high) - log_price - drift) / vol
-            m["model_prob"] = norm.cdf(z)
+            m["model_prob"] = norm.cdf((math.log(high) - log_price - drift) / vol)
         elif high >= 100000:
-            #greater than X
-            z = (math.log(low) - log_price - drift) / vol
-            m["model_prob"] = 1.0 - norm.cdf(z)
+            m["model_prob"] = 1.0 - norm.cdf((math.log(low) - log_price - drift) / vol)
         else:
-            z_low = (math.log(low) - log_price - drift) / vol
-            z_high = (math.log(high) - log_price - drift) / vol
-            m["model_prob"] = norm.cdf(z_high) - norm.cdf(z_low)
+            z_lo = (math.log(low) - log_price - drift) / vol
+            z_hi = (math.log(high) - log_price - drift) / vol
+            m["model_prob"] = norm.cdf(z_hi) - norm.cdf(z_lo)
 
     return markets
 
 
-def find_best_bets(markets):
-    """find ranges where our model says the market underprices the probability.
-    edge = model_prob - market_price (positive = underpriced = good bet)
-    also check for pure arb (top-k sum < 1) among highest-probability ranges.
+def format_range(m):
+    """human readable range label"""
+    if m["low"] == 0:
+        return f"<${m['high']:,}"
+    if m["high"] >= 100000:
+        return f">${m['low']:,}"
+    return f"${m['low']:,}-${m['high']:,}"
+
+
+def compute_bets(markets, budget):
+    """pick ranges to bet on and allocate budget.
+
+    strategy:
+    1. if top-k ranges have pure arb (sum < 1), bet proportional to price
+    2. otherwise bet on ranges where model_prob > market_price, sized by edge
     """
-    for m in markets:
-        m["edge"] = m["model_prob"] - m["market_price"]
-        m["kelly_fraction"] = max(0, (m["model_prob"] * (1 / m["market_price"] - 1) - (1 - m["model_prob"])) / (1 / m["market_price"] - 1)) if m["market_price"] > 0 else 0
+    by_price = sorted(markets, key=lambda x: x["price"], reverse=True)
 
-    #sort by edge descending
-    by_edge = sorted(markets, key=lambda x: x["edge"], reverse=True)
-
-    #also check arb among top market-priced ranges
-    by_price = sorted(markets, key=lambda x: x["market_price"], reverse=True)
+    #check for pure arb
     for k in range(2, min(5, len(by_price) + 1)):
         top_k = by_price[:k]
-        price_sum = sum(m["market_price"] for m in top_k)
+        price_sum = sum(m["price"] for m in top_k)
         if price_sum < 1.0:
+            payout = budget / price_sum
+            bets = []
+            for m in top_k:
+                amount = budget * m["price"] / price_sum
+                bets.append({
+                    "range": format_range(m),
+                    "price": m["price"],
+                    "bet": round(amount, 2),
+                    "shares": round(amount / m["price"], 2),
+                    "yes_token_id": m["yes_token_id"],
+                })
             return {
-                "type": "arbitrage",
-                "k": k,
-                "price_sum": price_sum,
-                "profit_margin": 1.0 - price_sum,
-                "ranges": top_k,
+                "strategy": "arbitrage",
+                "note": f"top {k} ranges sum to {price_sum:.4f} — guaranteed payout if BTC lands in any",
+                "price_sum": round(price_sum, 4),
+                "guaranteed_payout": round(payout, 2),
+                "guaranteed_profit": round(payout - budget, 2),
+                "tail_risk": round(1.0 - sum(m["model_prob"] for m in top_k), 4),
+                "bets": bets,
             }
 
-    #no pure arb, return best edge bets
-    good_bets = [m for m in by_edge if m["edge"] > 0.02]
+    #no arb — bet on underpriced ranges weighted by edge
+    edges = [{"m": m, "edge": m["model_prob"] - m["price"]} for m in markets if m["model_prob"] > m["price"] + 0.02]
+    if not edges:
+        edges = sorted([{"m": m, "edge": m["model_prob"] - m["price"]} for m in markets], key=lambda x: x["edge"], reverse=True)[:2]
+
+    total_edge = sum(e["edge"] for e in edges)
+    bets = []
+    for e in edges:
+        m = e["m"]
+        amount = budget * e["edge"] / total_edge if total_edge > 0 else budget / len(edges)
+        bets.append({
+            "range": format_range(m),
+            "price": m["price"],
+            "model_prob": round(m["model_prob"], 4),
+            "edge": round(e["edge"], 4),
+            "bet": round(amount, 2),
+            "shares": round(amount / m["price"], 2),
+            "payout_if_wins": round(amount / m["price"], 2),
+            "yes_token_id": m["yes_token_id"],
+        })
+
     return {
-        "type": "edge",
-        "ranges": good_bets if good_bets else by_edge[:3],
+        "strategy": "edge",
+        "note": "no pure arb — betting on ranges underpriced vs volatility model",
+        "bets": bets,
     }
 
 
-def analyze_event(event, current_price, mu, sigma):
-    """full analysis pipeline for one btc daily event"""
+def analyze_event(event, current_price, mu, sigma, budget):
+    """full analysis for one btc daily event"""
     markets = parse_event_markets(event)
     if not markets:
         return None
@@ -174,25 +199,26 @@ def analyze_event(event, current_price, mu, sigma):
     except (ValueError, AttributeError):
         days_ahead = 1
 
-    markets = model_range_probabilities(current_price, mu, sigma, markets, days_ahead)
-    best = find_best_bets(markets)
+    markets = model_probabilities(current_price, mu, sigma, markets, days_ahead)
+    bets = compute_bets(markets, budget)
 
     return {
         "event_id": event.get("id"),
         "title": event.get("title"),
         "end_date": end_str,
-        "current_btc": round(current_price, 0),
+        "btc_price": round(current_price, 0),
         "days_ahead": round(days_ahead, 1),
-        "volatility": round(sigma, 4),
-        "best": best,
+        "daily_vol": round(sigma, 4),
+        "budget": budget,
+        **bets,
         "all_ranges": [
             {
-                "range": f"${m['low']:,}-${m['high']:,}" if m["high"] < 100000 else f">${m['low']:,}" if m["low"] > 0 else f"<${m['high']:,}",
-                "market": round(m["market_price"], 4),
+                "range": format_range(m),
+                "market": round(m["price"], 4),
                 "model": round(m["model_prob"], 4),
-                "edge": round(m["edge"], 4),
+                "edge": round(m["model_prob"] - m["price"], 4),
             }
-            for m in sorted(markets, key=lambda x: x["market_price"], reverse=True)
+            for m in sorted(markets, key=lambda x: x["price"], reverse=True)
         ],
     }
 
@@ -200,7 +226,7 @@ def analyze_event(event, current_price, mu, sigma):
 def main():
     print("fetching btc volatility...", file=sys.stderr)
     current_price, mu, sigma = get_btc_volatility()
-    print(f"BTC: ${current_price:,.0f}, daily vol: {sigma:.4f}", file=sys.stderr)
+    print(f"BTC: ${current_price:,.0f}, vol: {sigma:.4f}", file=sys.stderr)
 
     print("fetching btc daily events...", file=sys.stderr)
     events = fetch_btc_events()
@@ -208,13 +234,13 @@ def main():
 
     results = []
     for event in events:
-        analysis = analyze_event(event, current_price, mu, sigma)
+        analysis = analyze_event(event, current_price, mu, sigma, BET_BUDGET)
         if analysis:
             results.append(analysis)
 
     with open("btc_ranges.json", "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
-    print(f"wrote {len(results)} analyses to btc_ranges.json")
+    print(f"wrote {len(results)} events to btc_ranges.json")
 
 
 if __name__ == "__main__":

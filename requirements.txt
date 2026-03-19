@@ -4,3 +4,6 @@ requests
 apscheduler
 yfinance
 scipy
+xgboost
+pandas
+scikit-learn

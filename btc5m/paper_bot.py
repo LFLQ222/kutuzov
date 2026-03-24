@@ -1,6 +1,6 @@
 import time
 from btc5m.config import (
-    BUDGET, ENTRY_LOW, ENTRY_HIGH, TP_PRICE, SWING_BPS,
+    BUDGET, ENTRY_LOW, ENTRY_HIGH, TP_PRICE, TP_CLOSE, SWING_BPS,
     SKIP_BPS, CALM_BPS, ENTRY_WINDOW, EXIT_START,
 )
 from btc5m.price import start_price_feed, get_btc_price, price_change_bps, clear_history, is_connected
@@ -135,9 +135,10 @@ def _run_window(skipping):
                     current_price = fresh["up_price"]
                 else:
                     current_price = fresh["down_price"]
-                if current_price >= TP_PRICE:
-                    profit = round(position["size"] * TP_PRICE - position["cost"], 2)
-                    print(f"  TAKE PROFIT: {side} hit {current_price:.3f} >= {TP_PRICE}, +${profit}")
+                if current_price >= TP_PRICE - TP_CLOSE and current_price > position["entry_price"]:
+                    sell_price = min(current_price, TP_PRICE)
+                    profit = round(position["size"] * sell_price - position["cost"], 2)
+                    print(f"  TAKE PROFIT: {side} @ {current_price:.3f} (tp={TP_PRICE}), +${profit}")
                     swing = _swing(btc_open)
                     paper.log_trade(window_ts, side, position["entry_price"], position["size"], position["cost"], "TP WIN", profit, btc_open, get_btc_price(), swing)
                     #wait for window end

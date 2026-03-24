@@ -1,6 +1,6 @@
 import time
 from btc5m.config import (
-    BUDGET, ENTRY_LOW, ENTRY_HIGH, TP_PRICE, SWING_BPS,
+    BUDGET, ENTRY_LOW, ENTRY_HIGH, TP_PRICE, TP_CLOSE, SWING_BPS,
     ARB_THRESHOLD, MIN_BOOK_SIZE, ENTRY_WINDOW, EXIT_START, DRY_RUN,
 )
 from btc5m.price import get_btc_price, price_change_bps, clear_history
@@ -186,6 +186,22 @@ def _monitor_and_exit(position, btc_open):
                     return
             except Exception:
                 pass
+
+        #check if price is close to TP — market sell to lock in profit
+        fresh = market.fetch_5m_market(window_ts)
+        if fresh:
+            current = fresh["up_price"] if side == "up" else fresh["down_price"]
+            if current >= TP_PRICE - TP_CLOSE and current > position["entry_price"]:
+                profit = round(position["size"] * current - position["cost"], 2)
+                print(f"  CLOSE ENOUGH: {side} @ {current:.3f} (tp={TP_PRICE}), selling +${profit}")
+                if client:
+                    if tp_order_id:
+                        market.cancel_order(client, tp_order_id)
+                    market.place_market_sell(client, token_id, position["size"], current - 0.02)
+                btc_close = get_btc_price()
+                swing = price_change_bps(btc_open, btc_close)
+                paper.log_trade(window_ts, side, position["entry_price"], position["size"], position["cost"], "TP CLOSE", profit, btc_open, btc_close, swing)
+                return
 
         #exit phase: stop-loss check in last minute
         if elapsed >= EXIT_START:

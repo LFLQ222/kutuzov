@@ -32,3 +32,4 @@ MIN_BOOK_SIZE = float(os.getenv("BTC5M_MIN_BOOK_SIZE", "10"))
 #timing (seconds)
 ENTRY_WINDOW = int(os.getenv("BTC5M_ENTRY_WINDOW", "120"))
 EXIT_START = int(os.getenv("BTC5M_EXIT_START", "240"))
+TP_CLOSE = float(os.getenv("BTC5M_TP_CLOSE", "0.03"))  #market sell if within this of TP

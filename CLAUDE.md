@@ -1,28 +1,28 @@
-## kutuzov — polymarket multi-outcome arbitrage bot
+## kutuzov — polymarket btc 5-minute trading bot
 
-scans polymarket for events where top-k outcome prices sum < 1.0, guaranteeing profit if any wins.
+buys the cheap side of btc 5-minute up/down markets as a contrarian play, takes profit or cuts losses before settlement.
 
 ### usage
 ```
-python main.py --scan              # json output of all opportunities
-python main.py --execute <id>      # place bets on event (needs .env creds)
-python main.py --monitor           # check open positions
-python main.py                     # continuous 30min scanner with telegram alerts
+python -m btc5m.run           # continuous loop
+python -m btc5m.run --once    # single window
 ```
 
 ### how it works
-- `discovery.py` fetches active multi-outcome events from gamma api (public, no keys)
-- `analyzer.py` finds top-k where sum(prices) < 1.0, allocates proportional to price for equal payouts
-- `executor.py` places orders via py-clob-client (needs api keys, defaults DRY_RUN=true)
-- `notifier.py` sends telegram alerts
-- `monitor.py` tracks positions in positions.json
+- `btc5m/price.py` streams real-time btc price via binance websocket
+- `btc5m/market.py` fetches 5m markets from gamma api by timestamp slug, places orders via clob api
+- `btc5m/bot.py` state machine per window: entry (first 2 min) -> monitor -> stop-loss exit (last min)
+- `btc5m/config.py` all thresholds and settings from env vars
 
-### bugs solved
-- inactive/placeholder markets had `bestAsk=1` — fix: filter `active=True` only
-- inverse allocation gave unequal payouts — fix: allocate proportional to price
-- discovery prints polluted json stdout — fix: status prints go to stderr
+### strategy
+- buy whichever side is at 0.20-0.30 (contrarian/mean-reversion)
+- take profit at 0.40+ via limit sell
+- stop-loss in final minute if btc moved hard against position
+- skip-until-calm filter: skip volatile windows until market calms down
+- arb mode: if up + down sum < 0.95, buy both for guaranteed profit
 
 ### rules
 - keep code minimal, no fix-on-fix
-- scan output is json to stdout, status to stderr
+- DRY_RUN=true by default
 - venv at `./venv/`, activate before running
+- thresholds in basis points, not dollar amounts

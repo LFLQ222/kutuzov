@@ -3,6 +3,3 @@ __pycache__/
 *.pyc
 .env
 .claude/
-positions.json
-opportunities.json
-btc_ranges.json
